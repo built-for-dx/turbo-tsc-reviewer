@@ -126,6 +126,16 @@ function createReviewSummary(errors, sha) {
  * Turborepo PR Reviewer
  * Processes Turborepo JSON output and reports TypeScript errors via GitHub Annotations and a persistent PR summary.
  */
+/** Reports a completed result on a fresh Check Run; failures are logged, never thrown. */
+async function reportOnNewCheckRun(octokit, params) {
+  try {
+    await octokit.rest.checks.create(params);
+    info(`Reported results on a new completed Check Run as ${params.conclusion}.`);
+  } catch (e) {
+    warning(`Fallback Check Run creation failed: ${e.message}`);
+  }
+}
+
 async function run() {
   info("Initializing quality review analysis.");
 
@@ -288,30 +298,35 @@ async function run() {
 
   // 4. Finalize Check Run
   if (checkRunId) {
+    const conclusion = errors.length > 0 ? "failure" : "success";
+    const completion = {
+      owner,
+      repo,
+      status: "completed",
+      conclusion,
+      completed_at: new Date().toISOString(),
+      output: {
+        title: checkTitle,
+        summary: summaryBody,
+        annotations: errors.slice(0, 50).map((err) => ({
+          path: err.path,
+          start_line: err.line,
+          end_line: err.line,
+          annotation_level: "failure",
+          message: err.body,
+        })),
+      },
+    };
     try {
-      const conclusion = errors.length > 0 ? "failure" : "success";
-      await octokit.rest.checks.update({
-        owner,
-        repo,
-        check_run_id: checkRunId,
-        status: "completed",
-        conclusion: conclusion,
-        completed_at: new Date().toISOString(),
-        output: {
-          title: checkTitle,
-          summary: summaryBody,
-          annotations: errors.slice(0, 50).map((err) => ({
-            path: err.path,
-            start_line: err.line,
-            end_line: err.line,
-            annotation_level: "failure",
-            message: err.body,
-          })),
-        },
-      });
+      await octokit.rest.checks.update({ ...completion, check_run_id: checkRunId });
       info(`Finalized Check Run as ${conclusion}.`);
     } catch (e) {
-      warning(`Failed to finalize Check Run: ${e.message}`);
+      warning(
+        `Failed to finalize Check Run ${checkRunId} (status ${e.status}): ${e.message}`,
+      );
+      if (e.status === 404) {
+        await reportOnNewCheckRun(octokit, { ...completion, name: "tsc", head_sha: sha });
+      }
     }
   }
 
